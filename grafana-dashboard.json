@@ -1,0 +1,321 @@
+{
+  "uid": "ac-cost-monitor-v1",
+  "title": "⚡ Coste Aire Acondicionado",
+  "tags": ["ac", "pvpc", "esios", "energia"],
+  "timezone": "Europe/Madrid",
+  "refresh": "5m",
+  "time": { "from": "now/d", "to": "now/d" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "💰 Precio PVPC ahora",
+      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyEUR",
+          "decimals": 4,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.12 },
+              { "color": "orange", "value": 0.18 },
+              { "color": "red", "value": 0.25 }
+            ]
+          },
+          "mappings": []
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "none" },
+      "targets": [
+        {
+          "expr": "ac_pvpc_price_eur_kwh",
+          "legendFormat": "€/kWh",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "⚡ Coste total ahora",
+      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyEUR",
+          "decimals": 4,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.05 },
+              { "color": "orange", "value": 0.10 },
+              { "color": "red", "value": 0.20 }
+            ]
+          }
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" },
+      "targets": [
+        {
+          "expr": "ac_total_cost_eur_hour",
+          "legendFormat": "€/hora",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "📊 Proyección día (sin bono)",
+      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyEUR",
+          "decimals": 3,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1.50 },
+              { "color": "red", "value": 3.00 }
+            ]
+          }
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "targets": [
+        {
+          "expr": "ac_total_cost_day_projected_eur",
+          "legendFormat": "€ hoy",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "🎫 Proyección día (con Bono Social)",
+      "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyEUR",
+          "decimals": 3,
+          "color": { "mode": "fixed", "fixedColor": "blue" }
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" },
+      "targets": [
+        {
+          "expr": "ac_total_cost_day_after_bono_eur",
+          "legendFormat": "€ con bono",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "💵 Acumulado hoy",
+      "gridPos": { "x": 16, "y": 0, "w": 4, "h": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyEUR",
+          "decimals": 3
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "targets": [
+        {
+          "expr": "ac_cost_accumulated_today_eur",
+          "legendFormat": "acumulado",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "⏰ Hora más barata",
+      "gridPos": { "x": 20, "y": 0, "w": 4, "h": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "color": { "mode": "fixed", "fixedColor": "green" }
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" },
+      "targets": [
+        {
+          "expr": "ac_pvpc_cheapest_hour",
+          "legendFormat": "hora",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "📈 Precio PVPC — curva del día",
+      "gridPos": { "x": 0, "y": 4, "w": 24, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyEUR",
+          "decimals": 4,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "gradientMode": "opacity"
+          },
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "options": {
+        "tooltip": { "mode": "single" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "targets": [
+        {
+          "expr": "ac_pvpc_price_eur_kwh",
+          "legendFormat": "€/kWh PVPC",
+          "refId": "A"
+        },
+        {
+          "expr": "ac_pvpc_daily_avg_eur_kwh",
+          "legendFormat": "Media del día",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "table",
+      "title": "🌬️ Máquinas — estado y coste por hora",
+      "gridPos": { "x": 0, "y": 12, "w": 14, "h": 8 },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "center" } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Activa" },
+            "properties": [
+              { "id": "custom.width", "value": 80 },
+              {
+                "id": "mappings",
+                "value": [
+                  { "type": "value", "value": "1", "result": { "text": "✅ ON", "color": "green" } },
+                  { "type": "value", "value": "0", "result": { "text": "⭕ OFF", "color": "red" } }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Potencia (kW)" },
+            "properties": [{ "id": "unit", "value": "watt" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Coste (€/h)" },
+            "properties": [{ "id": "unit", "value": "currencyEUR" }, { "id": "decimals", "value": 4 }]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "Coste (€/h)", "desc": true }]
+      },
+      "targets": [
+        {
+          "expr": "ac_machine_active",
+          "legendFormat": "{{label}}",
+          "refId": "A",
+          "instant": true
+        },
+        {
+          "expr": "ac_machine_power_kw * 1000",
+          "legendFormat": "{{label}}",
+          "refId": "B",
+          "instant": true
+        },
+        {
+          "expr": "ac_machine_cost_eur_hour",
+          "legendFormat": "{{label}}",
+          "refId": "C",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        { "id": "merge", "options": {} },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "Field": "Máquina",
+              "Value #A": "Activa",
+              "Value #B": "Potencia (kW)",
+              "Value #C": "Coste (€/h)"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "💸 Coste por hora — histórico hoy",
+      "gridPos": { "x": 14, "y": 12, "w": 10, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyEUR",
+          "decimals": 4,
+          "custom": { "lineWidth": 2, "fillOpacity": 20 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "ac_machine_cost_eur_hour",
+          "legendFormat": "{{label}}",
+          "refId": "A"
+        },
+        {
+          "expr": "ac_total_cost_eur_hour",
+          "legendFormat": "TOTAL",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "stat",
+      "title": "🎫 Descuento Bono Social hoy (€)",
+      "gridPos": { "x": 0, "y": 20, "w": 6, "h": 3 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyEUR",
+          "decimals": 3,
+          "color": { "mode": "fixed", "fixedColor": "blue" }
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [
+        {
+          "expr": "ac_bono_social_discount_eur_day",
+          "legendFormat": "ahorro €",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "type": "text",
+      "title": "ℹ️ Bono Social 2025/2026",
+      "gridPos": { "x": 6, "y": 20, "w": 18, "h": 3 },
+      "options": {
+        "mode": "markdown",
+        "content": "**Bono Social eléctrico** — Descuento sobre el término de energía del PVPC:\n- **2025**: 42,5% (consumidores vulnerables)\n- **2026**: 35% (salvo prórroga o cambio legislativo)\n\nEdita `bono_social_pct` en `/config/schedule.json` para cambiar el porcentaje activo."
+      }
+    }
+  ],
+  "schemaVersion": 38
+}
