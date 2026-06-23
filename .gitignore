@@ -1,0 +1,4 @@
+-e .env
+*.pyc
+__pycache__/
+config/schedule.json
