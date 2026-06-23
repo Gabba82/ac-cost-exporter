@@ -1,0 +1,23 @@
+services:
+  ac-cost-exporter:
+    build: .
+    container_name: ac-cost-exporter
+    restart: unless-stopped
+    ports:
+      - "9212:9212"
+    environment:
+      # Token de ESIOS: regístrate en https://api.esios.ree.es/ para obtenerlo (es gratuito)
+      - ESIOS_TOKEN=${ESIOS_TOKEN}
+      # Descuento Bono Social (42.5 en 2025, 35 en 2026 salvo cambio legislativo)
+      # Puedes sobreescribirlo también en el schedule.json por día
+      - BONO_SOCIAL_PCT=0
+      - CONFIG_FILE=/config/schedule.json
+      - EXPORTER_PORT=9212
+    volumes:
+      - /DATA/AppData/ac-cost-exporter/config:/config
+    networks:
+      - observatorio_default
+
+networks:
+  observatorio_default:
+    external: true
