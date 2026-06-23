@@ -19,18 +19,13 @@ from zoneinfo import ZoneInfo
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("ac-cost-exporter")
 
-# ─── Zona horaria ─────────────────────────────────────────────────────────────
 TZ = ZoneInfo("Europe/Madrid")
 
-# ─── ESIOS config ─────────────────────────────────────────────────────────────
-ESIOS_TOKEN = os.environ.get("ESIOS_TOKEN", "")
-
-# ESIOS publica el PVPC en varios indicadores según el periodo:
-#   1001  → PVPC histórico (hasta ~2024)
-#   10211 → PVPC desde 2024 en adelante (€/MWh)
-# El exporter prueba primero 10211 y cae a 1001 si no hay datos.
-ESIOS_INDICATORS = [10211, 1001]
-ESIOS_BASE       = "https://api.esios.ree.es/indicators"
+# ESIOS devuelve múltiples filas por hora (una por zona geográfica).
+# Filtramos solo la Península (geo_id 8741).
+ESIOS_GEO_PENINSULA = 8741
+ESIOS_INDICATORS    = [1001]   # 1001 = PVPC T. 2.0TD (€/MWh)
+ESIOS_BASE          = "https://api.esios.ree.es/indicators"
 
 def esios_headers():
     return {
@@ -38,6 +33,10 @@ def esios_headers():
         "Content-Type": "application/json",
         "x-api-key":    ESIOS_TOKEN,
     }
+
+ESIOS_TOKEN     = os.environ.get("ESIOS_TOKEN", "")
+CONFIG_FILE     = os.environ.get("CONFIG_FILE", "/config/schedule.json")
+BONO_SOCIAL_PCT = float(os.environ.get("BONO_SOCIAL_PCT", "42.5"))
 
 # ─── Máquinas ─────────────────────────────────────────────────────────────────
 MACHINES = {
@@ -58,25 +57,20 @@ MACHINES = {
     },
 }
 
-CONFIG_FILE    = os.environ.get("CONFIG_FILE", "/config/schedule.json")
-BONO_SOCIAL_PCT = float(os.environ.get("BONO_SOCIAL_PCT", "42.5"))
-
 # ─── Métricas Prometheus ──────────────────────────────────────────────────────
-pvpc_price_eur_kwh      = Gauge("ac_pvpc_price_eur_kwh",       "Precio PVPC actual €/kWh")
-pvpc_price_hour         = Gauge("ac_pvpc_price_hour",           "Hora del precio PVPC (0-23)")
-pvpc_daily_avg          = Gauge("ac_pvpc_daily_avg_eur_kwh",    "Precio medio PVPC del día")
-pvpc_cheapest_hour      = Gauge("ac_pvpc_cheapest_hour",        "Hora más barata (0-23)")
-pvpc_most_expensive_hour= Gauge("ac_pvpc_most_expensive_hour",  "Hora más cara (0-23)")
-
-machine_active          = Gauge("ac_machine_active",            "1 si activa", ["machine", "label"])
-machine_power_kw        = Gauge("ac_machine_power_kw",          "Potencia kW", ["machine", "label", "mode"])
-machine_cost_eur_hour   = Gauge("ac_machine_cost_eur_hour",     "€/hora por máquina", ["machine", "label"])
-
-total_cost_eur_hour     = Gauge("ac_total_cost_eur_hour",       "€/hora total ahora")
-total_cost_day_projected= Gauge("ac_total_cost_day_projected_eur", "Proyección día (€)")
-cost_accumulated_today  = Gauge("ac_cost_accumulated_today_eur","Acumulado hoy (€)")
-bono_discount_eur_day   = Gauge("ac_bono_social_discount_eur_day", "Ahorro Bono Social (€)")
-total_cost_after_bono   = Gauge("ac_total_cost_day_after_bono_eur", "Proyección con bono (€)")
+pvpc_price_eur_kwh       = Gauge("ac_pvpc_price_eur_kwh",          "Precio PVPC actual €/kWh")
+pvpc_price_hour          = Gauge("ac_pvpc_price_hour",              "Hora del precio PVPC (0-23)")
+pvpc_daily_avg           = Gauge("ac_pvpc_daily_avg_eur_kwh",       "Precio medio PVPC del día")
+pvpc_cheapest_hour       = Gauge("ac_pvpc_cheapest_hour",           "Hora más barata (0-23)")
+pvpc_most_expensive_hour = Gauge("ac_pvpc_most_expensive_hour",     "Hora más cara (0-23)")
+machine_active           = Gauge("ac_machine_active",               "1 si activa", ["machine", "label"])
+machine_power_kw         = Gauge("ac_machine_power_kw",             "Potencia kW", ["machine", "label", "mode"])
+machine_cost_eur_hour    = Gauge("ac_machine_cost_eur_hour",        "€/hora por máquina", ["machine", "label"])
+total_cost_eur_hour      = Gauge("ac_total_cost_eur_hour",          "€/hora total ahora")
+total_cost_day_projected = Gauge("ac_total_cost_day_projected_eur", "Proyección día (€)")
+cost_accumulated_today   = Gauge("ac_cost_accumulated_today_eur",   "Acumulado hoy (€)")
+bono_discount_eur_day    = Gauge("ac_bono_social_discount_eur_day", "Ahorro Bono Social (€)")
+total_cost_after_bono    = Gauge("ac_total_cost_day_after_bono_eur","Proyección con bono (€)")
 
 # ─── Caché de precios ─────────────────────────────────────────────────────────
 _price_cache: dict[int, float] = {}
@@ -84,54 +78,56 @@ _cache_date: date | None = None
 
 
 def fetch_pvpc_prices(target_date: date) -> dict[int, float]:
-    """Descarga los 24 precios PVPC probando los indicadores en orden."""
+    """
+    Descarga los precios PVPC de ESIOS para target_date.
+    Filtra solo geo_id 8741 (Península) para evitar duplicados por zona.
+    Los valores vienen en €/MWh → se convierten a €/kWh.
+    """
     start = datetime(target_date.year, target_date.month, target_date.day,
                      0, 0, 0, tzinfo=TZ).isoformat()
     end   = datetime(target_date.year, target_date.month, target_date.day,
                      23, 59, 59, tzinfo=TZ).isoformat()
 
     for indicator in ESIOS_INDICATORS:
-        url = f"{ESIOS_BASE}/{indicator}"
+        url    = f"{ESIOS_BASE}/{indicator}"
         params = {"start_date": start, "end_date": end}
         try:
             r = requests.get(url, headers=esios_headers(), params=params, timeout=15)
             log.info(f"ESIOS indicator {indicator} → HTTP {r.status_code}")
 
-            if r.status_code == 403:
-                log.error("ESIOS: 403 Forbidden — comprueba que el ESIOS_TOKEN es válido")
-                continue
-            if r.status_code == 401:
-                log.error("ESIOS: 401 Unauthorized — token no enviado o caducado")
+            if r.status_code in (401, 403):
+                log.error(f"ESIOS: HTTP {r.status_code} — comprueba que ESIOS_TOKEN es válido y está definido en .env")
                 continue
 
             r.raise_for_status()
-            data   = r.json()
-            values = data.get("indicator", {}).get("values", [])
+            values = r.json().get("indicator", {}).get("values", [])
+            log.info(f"ESIOS: {len(values)} filas totales (incluye todas las zonas geográficas)")
 
-            log.info(f"ESIOS indicator {indicator} → {len(values)} valores recibidos")
+            # Filtrar solo Península (geo_id 8741)
+            peninsula = [v for v in values if v.get("geo_id") == ESIOS_GEO_PENINSULA]
+            log.info(f"ESIOS: {len(peninsula)} filas Península")
 
-            if not values:
-                # Loguear la respuesta raw para diagnóstico
-                log.warning(f"Respuesta raw (primeros 300 chars): {r.text[:300]}")
+            if not peninsula:
+                log.warning("Sin datos para Península — puede que los precios de mañana aún no estén publicados")
                 continue
 
             prices: dict[int, float] = {}
-            for v in values:
-                raw_dt = v.get("datetime") or v.get("datetime_utc", "")
-                raw_dt = raw_dt.replace("Z", "+00:00")
+            for v in peninsula:
+                raw_dt   = (v.get("datetime") or v.get("datetime_utc", "")).replace("Z", "+00:00")
                 dt_local = datetime.fromisoformat(raw_dt).astimezone(TZ)
-                hora = dt_local.hour
-                # ESIOS devuelve €/MWh → convertir a €/kWh
-                prices[hora] = v["value"] / 1000.0
+                hora     = dt_local.hour
+                prices[hora] = round(v["value"] / 1000.0, 6)  # €/MWh → €/kWh
 
-            log.info(f"PVPC cargado para {target_date} con indicador {indicator}: "
-                     f"{len(prices)} horas | min={min(prices.values()):.4f} max={max(prices.values()):.4f} €/kWh")
+            log.info(
+                f"PVPC {target_date} | {len(prices)} horas | "
+                f"min={min(prices.values()):.4f} max={max(prices.values()):.4f} €/kWh"
+            )
             return prices
 
         except Exception as e:
             log.error(f"Error con indicador {indicator}: {e}")
 
-    log.error("No se pudieron obtener precios de ningún indicador ESIOS")
+    log.error("No se pudieron obtener precios de ESIOS")
     return {}
 
 
@@ -159,13 +155,11 @@ def update_metrics():
     now         = datetime.now(TZ)
     today       = now.date()
     hora_actual = now.hour
+    prices      = get_prices(today)
+    schedule    = load_schedule()
+    bono_pct    = schedule.get("bono_social_pct", BONO_SOCIAL_PCT)
 
-    prices   = get_prices(today)
-    schedule = load_schedule()
-
-    bono_pct      = schedule.get("bono_social_pct", BONO_SOCIAL_PCT)
     precio_actual = prices.get(hora_actual, 0.0)
-
     pvpc_price_eur_kwh.set(precio_actual)
     pvpc_price_hour.set(hora_actual)
 
@@ -184,10 +178,8 @@ def update_metrics():
     total_proj     = 0.0
     total_accum    = 0.0
 
-    machines_sched = schedule.get("machines", {})
-
     for machine_id, specs in MACHINES.items():
-        sched     = machines_sched.get(machine_id, {})
+        sched     = schedule.get("machines", {}).get(machine_id, {})
         is_active = sched.get("active", False)
         mode      = sched.get("mode", "frio")
         hours     = sched.get("hours", [])
@@ -200,28 +192,22 @@ def update_metrics():
             machine_power_kw.labels(machine=machine_id, label=lbl, mode=mode).set(kw)
             cost_h = kw * precio_actual
             machine_cost_eur_hour.labels(machine=machine_id, label=lbl).set(cost_h)
-
             if hora_actual in hours:
                 total_kw_now   += kw
                 total_cost_now += cost_h
-
             for h in hours:
-                p = prices.get(h, avg)
-                total_proj += kw * p
-
+                total_proj  += kw * prices.get(h, avg)
             for h in hours:
                 if h < hora_actual:
-                    p = prices.get(h, avg)
-                    total_accum += kw * p
+                    total_accum += kw * prices.get(h, avg)
         else:
             machine_power_kw.labels(machine=machine_id, label=lbl, mode=mode).set(0)
             machine_cost_eur_hour.labels(machine=machine_id, label=lbl).set(0)
 
+    descuento = total_proj * (bono_pct / 100.0)
     total_cost_eur_hour.set(total_cost_now)
     total_cost_day_projected.set(total_proj)
     cost_accumulated_today.set(total_accum)
-
-    descuento = total_proj * (bono_pct / 100.0)
     bono_discount_eur_day.set(descuento)
     total_cost_after_bono.set(total_proj - descuento)
 
@@ -240,9 +226,9 @@ def main():
     start_http_server(port)
 
     if not ESIOS_TOKEN:
-        log.warning("⚠️  ESIOS_TOKEN no definido — las llamadas a ESIOS fallarán")
+        log.warning("⚠️  ESIOS_TOKEN no definido — comprueba que .env contiene: ESIOS_TOKEN=tu_token")
     else:
-        log.info(f"ESIOS_TOKEN cargado (primeros 8 chars: {ESIOS_TOKEN[:8]}...)")
+        log.info(f"✅ ESIOS_TOKEN cargado ({ESIOS_TOKEN[:8]}...)")
 
     while True:
         update_metrics()
