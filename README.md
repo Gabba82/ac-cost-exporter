@@ -17,43 +17,72 @@ usando precios PVPC de ESIOS (REE) y tu stack Grafana/Prometheus existente.
 
 ---
 
-## Paso 1 — Token ESIOS
+## Instalación
 
-1. Regístrate gratis en https://api.esios.ree.es/  
-2. Ve a tu perfil → "Personal token"  
-3. Cópialo y ponlo en `.env`:
+### Requisitos previos
+
+- Docker y Docker Compose instalados
+- Red Docker `observatorio_default` existente (la del stack Grafana/Prometheus)
+- Token de ESIOS gratuito → regístrate en https://api.esios.ree.es/ → perfil → "Personal token"
+
+---
+
+### 1 — Clonar el repositorio
 
 ```bash
-cp .env.example .env
-# edita .env y rellena ESIOS_TOKEN=tu_token_aqui
-```
-
-O expórtalo directamente:
-```bash
-export ESIOS_TOKEN="tu_token_aqui"
+git clone https://github.com/Gabba82/ac-cost-exporter.git /DATA/AppData/ac-cost-exporter
+cd /DATA/AppData/ac-cost-exporter
 ```
 
 ---
 
-## Paso 2 — Desplegar el contenedor
+### 2 — Configurar el token de ESIOS
+
+Crea el fichero `.env` en la raíz del proyecto:
 
 ```bash
-# En onster, en la carpeta del proyecto:
-mkdir -p /DATA/AppData/ac-cost-exporter/config
-cp schedule.json.example /DATA/AppData/ac-cost-exporter/config/schedule.json
+echo "ESIOS_TOKEN=tu_token_aqui" > .env
+```
 
-# Lanza el contenedor
+> ⚠️ El `.gitignore` ya excluye `.env` para que el token nunca se suba al repo.
+
+---
+
+### 3 — Crear el schedule del día
+
+```bash
+mkdir -p config
+cp schedule.json.example config/schedule.json
+```
+
+Edita `config/schedule.json` para indicar qué máquinas enciendes y en qué horas (ver sección [Uso diario](#uso-diario--schedulejson)).
+
+---
+
+### 4 — Arrancar el contenedor
+
+```bash
 docker compose up -d --build
+```
 
-# Comprueba que funciona
+Verifica que el exporter está publicando métricas:
+
+```bash
 curl http://localhost:9212/metrics | grep ac_pvpc
 ```
 
+Deberías ver algo como:
+```
+ac_pvpc_price_eur_kwh 0.1423
+ac_pvpc_daily_avg_eur_kwh 0.1187
+...
+```
+
 ---
 
-## Paso 3 — Prometheus
+### 5 — Añadir a Prometheus
 
-Añade al `prometheus.yml` el bloque de `prometheus-scrape.yml`:
+Edita tu `prometheus.yml` y añade el job (también disponible en `prometheus-scrape.yml`):
 
 ```yaml
 scrape_configs:
@@ -64,24 +93,35 @@ scrape_configs:
     scrape_interval: 5m
 ```
 
-Luego reinicia Prometheus:
+Reinicia Prometheus para que cargue la nueva configuración:
+
 ```bash
-docker restart prometheus   # o como lo tengas nombrado
+docker restart prometheus   # ajusta el nombre si es distinto
 ```
 
 ---
 
-## Paso 4 — Dashboard Grafana
+### 6 — Importar el dashboard en Grafana
 
-1. Grafana → Dashboards → Import  
-2. Pega el contenido de `grafana-dashboard.json`  
-3. Selecciona tu datasource Prometheus → Import
+1. Grafana → Dashboards → **Import**
+2. Pega el contenido de `grafana-dashboard.json` (o sube el fichero directamente)
+3. Selecciona tu datasource Prometheus → **Import**
+
+---
+
+### Actualizar a la última versión
+
+```bash
+cd /DATA/AppData/ac-cost-exporter
+git pull
+docker compose up -d --build
+```
 
 ---
 
 ## Uso diario — schedule.json
 
-Cada mañana editas `/DATA/AppData/ac-cost-exporter/config/schedule.json`:
+Cada mañana editas `config/schedule.json` para planificar el uso del aire ese día:
 
 ```json
 {
@@ -107,18 +147,22 @@ Cada mañana editas `/DATA/AppData/ac-cost-exporter/config/schedule.json`:
 }
 ```
 
-El exporter recarga el fichero cada 5 minutos automáticamente.  
-No hace falta reiniciar el contenedor.
+El exporter recarga el fichero cada 5 minutos automáticamente — no hace falta reiniciar el contenedor.
 
 ---
 
 ## Bono Social
 
-- Edita `bono_social_pct` en el schedule.json  
-  - **2025**: `42.5`  
-  - **2026** (salvo cambio): `35.0`  
-- El descuento se aplica sobre el término de energía (no sobre los peajes)  
-- El dashboard muestra la proyección sin bono y con bono para comparar
+Edita `bono_social_pct` en el `schedule.json` según el año:
+
+| Año  | Vulnerable | Vulnerable severo | Estado |
+|------|-----------|------------------|--------|
+| 2025 | 42,5%     | 57,5%            | Finalizado |
+| 2026 | **42,5%** | **57,5%**        | ✅ Vigente (RDL 16/2025 + RDL 2/2026) |
+| 2027 | 35%       | 50%              | Salvo prórroga |
+
+> El descuento se aplica sobre el término de energía del PVPC (no sobre peajes ni impuestos).
+> El dashboard muestra siempre la proyección sin bono y con bono para comparar.
 
 ---
 
@@ -126,12 +170,11 @@ No hace falta reiniciar el contenedor.
 
 Puedes automatizar la edición del schedule desde n8n:
 
-1. Crea un webhook HTTP en n8n  
-2. El flow escribe el JSON en `/DATA/AppData/ac-cost-exporter/config/schedule.json`  
-3. Opcionalmente envíate un Telegram con la proyección del día al publicar el schedule
+1. Crea un webhook HTTP en n8n
+2. El flow escribe el JSON en `config/schedule.json`
+3. Opcionalmente envíate un Telegram con la proyección del día
 
-El exporter ya conecta a la red `observatorio_default`, igual que el resto
-de tu stack, así que n8n puede alcanzarlo directamente.
+El exporter ya conecta a la red `observatorio_default`, igual que el resto de tu stack, así que n8n puede alcanzarlo directamente.
 
 ---
 
