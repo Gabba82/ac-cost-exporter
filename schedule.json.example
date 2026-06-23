@@ -1,0 +1,29 @@
+{
+  "_comment": "Edita este fichero cada mañana para planificar el uso del aire ese día.",
+  "_comment2": "Puedes editarlo a mano o con n8n via un webhook.",
+
+  "date": "2025-07-15",
+
+  "bono_social_pct": 42.5,
+
+  "machines": {
+    "mitsubishi_grande": {
+      "active": true,
+      "mode": "frio",
+      "label_override": "Salón",
+      "hours": [9, 10, 11, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+    },
+    "mitsubishi_pequena": {
+      "active": true,
+      "mode": "frio",
+      "label_override": "Habitación",
+      "hours": [22, 23]
+    },
+    "lg_viejita": {
+      "active": false,
+      "mode": "frio",
+      "label_override": "Despacho",
+      "hours": []
+    }
+  }
+}
