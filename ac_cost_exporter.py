@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""
+AC Cost Exporter para Prometheus
+Consulta ESIOS API (precio PVPC hora a hora) y calcula el coste estimado
+del aire acondicionado según las máquinas activas configuradas.
+
+Puerto: 9212
+"""
+
+import os
+import json
+import time
+import logging
+import requests
+from datetime import datetime, date, timedelta
+from prometheus_client import start_http_server, Gauge, Counter
+from zoneinfo import ZoneInfo
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("ac-cost-exporter")
+
+# ─── Zona horaria ────────────────────────────────────────────────────────────
+TZ = ZoneInfo("Europe/Madrid")
+
+# ─── ESIOS config ─────────────────────────────────────────────────────────────
+ESIOS_TOKEN   = os.environ.get("ESIOS_TOKEN", "")
+ESIOS_URL     = "https://api.esios.ree.es/indicators/1001"  # PVPC horario
+ESIOS_HEADERS = {
+    "Accept":        "application/json; application/vnd.esios-api-v1+json",
+    "Content-Type":  "application/json",
+    "x-api-key":     ESIOS_TOKEN,
+}
+
+# ─── Máquinas: consumo nominal en kW (frío / calor) ─────────────────────────
+MACHINES = {
+    "mitsubishi_grande": {
+        "label":       "Mitsubishi MSZ-HR35VF",
+        "kw_frio":     1.21,
+        "kw_calor":    0.975,
+    },
+    "mitsubishi_pequena": {
+        "label":       "Mitsubishi MSZ-HR25VF",
+        "kw_frio":     0.80,
+        "kw_calor":    0.850,
+    },
+    "lg_viejita": {
+        "label":       "LG AS-H126RKA2",
+        "kw_frio":     1.30,
+        "kw_calor":    1.20,
+    },
+}
+
+# ─── Fichero de configuración diaria (lo editas tú o lo escribe n8n) ─────────
+CONFIG_FILE = os.environ.get("CONFIG_FILE", "/config/schedule.json")
+
+# Bono Social descuento aplicable (porcentaje, 0 = sin bono)
+BONO_SOCIAL_PCT = float(os.environ.get("BONO_SOCIAL_PCT", "0"))
+
+# ─── Métricas Prometheus ──────────────────────────────────────────────────────
+pvpc_price_eur_kwh = Gauge(
+    "ac_pvpc_price_eur_kwh",
+    "Precio PVPC actual €/kWh (sin impuestos incluidos en ESIOS)",
+)
+pvpc_price_hour = Gauge(
+    "ac_pvpc_price_hour",
+    "Hora del precio PVPC actualmente cargado (0-23)",
+)
+machine_active = Gauge(
+    "ac_machine_active",
+    "1 si la máquina está activa según schedule, 0 si no",
+    ["machine", "label"],
+)
+machine_power_kw = Gauge(
+    "ac_machine_power_kw",
+    "Potencia consumida estimada en kW",
+    ["machine", "label", "mode"],
+)
+machine_cost_eur_hour = Gauge(
+    "ac_machine_cost_eur_hour",
+    "Coste estimado €/hora para esta máquina al precio actual",
+    ["machine", "label"],
+)
+total_cost_eur_hour = Gauge(
+    "ac_total_cost_eur_hour",
+    "Coste total estimado €/hora de todas las máquinas activas",
+)
+total_cost_day_projected = Gauge(
+    "ac_total_cost_day_projected_eur",
+    "Proyección del coste total del día (suma horas del schedule × precio medio día)",
+)
+bono_social_discount_eur_day = Gauge(
+    "ac_bono_social_discount_eur_day",
+    "Ahorro estimado por Bono Social en la proyección del día (€)",
+)
+total_cost_day_after_bono = Gauge(
+    "ac_total_cost_day_after_bono_eur",
+    "Proyección del coste del día aplicando el Bono Social (€)",
+)
+cost_accumulated_today = Gauge(
+    "ac_cost_accumulated_today_eur",
+    "Coste acumulado estimado del día hasta la hora actual (€)",
+)
+pvpc_daily_avg = Gauge(
+    "ac_pvpc_daily_avg_eur_kwh",
+    "Precio medio PVPC del día (media de las 24 horas disponibles)",
+)
+pvpc_cheapest_hour = Gauge(
+    "ac_pvpc_cheapest_hour",
+    "Hora más barata del día (0-23)",
+)
+pvpc_most_expensive_hour = Gauge(
+    "ac_pvpc_most_expensive_hour",
+    "Hora más cara del día (0-23)",
+)
+
+# ─── Caché de precios ESIOS ───────────────────────────────────────────────────
+_price_cache: dict[int, float] = {}   # hora → €/kWh
+_cache_date: date | None = None
+
+
+def fetch_pvpc_prices(target_date: date) -> dict[int, float]:
+    """Descarga los 24 precios PVPC para target_date desde ESIOS."""
+    start = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=TZ)
+    end   = datetime(target_date.year, target_date.month, target_date.day, 23, 59, 59, tzinfo=TZ)
+
+    params = {
+        "start_date": start.isoformat(),
+        "end_date":   end.isoformat(),
+    }
+    try:
+        r = requests.get(ESIOS_URL, headers=ESIOS_HEADERS, params=params, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        values = data["indicator"]["values"]
+        prices: dict[int, float] = {}
+        for v in values:
+            # ESIOS devuelve precio en €/MWh → convertir a €/kWh
+            dt_utc = datetime.fromisoformat(v["datetime"].replace("Z", "+00:00"))
+            dt_local = dt_utc.astimezone(TZ)
+            hora = dt_local.hour
+            prices[hora] = v["value"] / 1000.0
+        log.info(f"PVPC cargado para {target_date}: {len(prices)} horas")
+        return prices
+    except Exception as e:
+        log.error(f"Error al obtener PVPC de ESIOS: {e}")
+        return {}
+
+
+def get_prices(target_date: date) -> dict[int, float]:
+    global _price_cache, _cache_date
+    if _cache_date != target_date:
+        _price_cache = fetch_pvpc_prices(target_date)
+        _cache_date  = target_date
+    return _price_cache
+
+
+def load_schedule() -> dict:
+    """
+    Lee el fichero schedule.json.
+    Formato esperado:
+    {
+        "date": "2025-07-15",          // opcional, default = hoy
+        "bono_social_pct": 42.5,       // opcional, override de la variable de entorno
+        "machines": {
+            "mitsubishi_grande": {
+                "active": true,
+                "mode": "frio",        // "frio" o "calor"
+                "hours": [9,10,11,14,15,16,17,18,19,20,21,22]
+            },
+            "mitsubishi_pequena": {
+                "active": false,
+                "mode": "frio",
+                "hours": []
+            },
+            "lg_viejita": {
+                "active": true,
+                "mode": "frio",
+                "hours": [15,16,17,18,19,20]
+            }
+        }
+    }
+    """
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        log.warning(f"schedule.json no encontrado en {CONFIG_FILE}, usando schedule vacío")
+        return {"machines": {m: {"active": False, "mode": "frio", "hours": []} for m in MACHINES}}
+    except Exception as e:
+        log.error(f"Error leyendo schedule.json: {e}")
+        return {"machines": {m: {"active": False, "mode": "frio", "hours": []} for m in MACHINES}}
+
+
+def update_metrics():
+    now        = datetime.now(TZ)
+    today      = now.date()
+    hora_actual = now.hour
+
+    prices   = get_prices(today)
+    schedule = load_schedule()
+
+    # Override bono social desde schedule si viene
+    bono_pct = schedule.get("bono_social_pct", BONO_SOCIAL_PCT)
+
+    # ── Precio actual ──────────────────────────────────────────────────────
+    precio_actual = prices.get(hora_actual, 0.0)
+    pvpc_price_eur_kwh.set(precio_actual)
+    pvpc_price_hour.set(hora_actual)
+
+    # ── Estadísticas del día ───────────────────────────────────────────────
+    if prices:
+        avg   = sum(prices.values()) / len(prices)
+        cheap = min(prices, key=prices.get)
+        expen = max(prices, key=prices.get)
+        pvpc_daily_avg.set(avg)
+        pvpc_cheapest_hour.set(cheap)
+        pvpc_most_expensive_hour.set(expen)
+    else:
+        avg = 0.0
+
+    # ── Por máquina ────────────────────────────────────────────────────────
+    total_kw_now     = 0.0
+    total_cost_now   = 0.0
+    total_proj       = 0.0
+    total_accum      = 0.0
+
+    machines_sched = schedule.get("machines", {})
+
+    for machine_id, specs in MACHINES.items():
+        sched = machines_sched.get(machine_id, {})
+        is_active = sched.get("active", False)
+        mode      = sched.get("mode", "frio")
+        hours     = sched.get("hours", [])
+
+        lbl = specs["label"]
+        kw  = specs[f"kw_{mode}"]
+
+        machine_active.labels(machine=machine_id, label=lbl).set(1 if is_active else 0)
+
+        if is_active:
+            machine_power_kw.labels(machine=machine_id, label=lbl, mode=mode).set(kw)
+            cost_h = kw * precio_actual
+            machine_cost_eur_hour.labels(machine=machine_id, label=lbl).set(cost_h)
+
+            # ¿Está en hora activa ahora?
+            if hora_actual in hours:
+                total_kw_now   += kw
+                total_cost_now += cost_h
+
+            # Proyección: suma coste para cada hora del schedule al precio de esa hora
+            for h in hours:
+                p = prices.get(h, avg)
+                total_proj += kw * p
+
+            # Acumulado: horas pasadas del schedule que ya ocurrieron hoy
+            for h in hours:
+                if h < hora_actual:
+                    p = prices.get(h, avg)
+                    total_accum += kw * p
+        else:
+            machine_power_kw.labels(machine=machine_id, label=lbl, mode=mode).set(0)
+            machine_cost_eur_hour.labels(machine=machine_id, label=lbl).set(0)
+
+    total_cost_eur_hour.set(total_cost_now)
+    total_cost_day_projected.set(total_proj)
+    cost_accumulated_today.set(total_accum)
+
+    descuento = total_proj * (bono_pct / 100.0)
+    bono_social_discount_eur_day.set(descuento)
+    total_cost_day_after_bono.set(total_proj - descuento)
+
+    log.info(
+        f"[{now.strftime('%H:%M')}] "
+        f"PVPC={precio_actual:.4f}€/kWh | "
+        f"Activo ahora={total_kw_now:.2f}kW ({total_cost_now:.4f}€/h) | "
+        f"Proyección día={total_proj:.3f}€ | "
+        f"Con bono({bono_pct}%)={total_proj - descuento:.3f}€"
+    )
+
+
+def main():
+    port = int(os.environ.get("EXPORTER_PORT", "9212"))
+    log.info(f"Iniciando AC Cost Exporter en puerto {port}")
+    start_http_server(port)
+
+    if not ESIOS_TOKEN:
+        log.warning("ESIOS_TOKEN no definido — las llamadas a ESIOS fallarán")
+
+    while True:
+        update_metrics()
+        time.sleep(300)  # refresco cada 5 minutos
+
+
+if __name__ == "__main__":
+    main()
